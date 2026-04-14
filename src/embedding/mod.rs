@@ -30,7 +30,10 @@ impl EmbeddingConfig {
     /// Creates an EmbeddingConfig from the application Config.
     pub fn from_config(config: &Config) -> Self {
         Self {
-            url: format!("{}/v1/embeddings", config.embedding_url.trim_end_matches('/')),
+            url: format!(
+                "{}/v1/embeddings",
+                config.embedding_url.trim_end_matches('/')
+            ),
             model: config.embedding_model.clone(),
             batch_size: config.batch_size,
         }

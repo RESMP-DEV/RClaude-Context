@@ -1,0 +1,153 @@
+# Phase 3: BM25 Lexical Search Backend
+#
+# Complete the hybrid search pipeline by adding the lexical (keyword)
+# search leg. The hybrid fusion in hybrid.rs already accepts lexical_hits
+# but nothing produces them.
+#
+# SCOPE: contrib/RClaude-Context only.
+# DEPENDS ON: phase2_hybrid_incremental.yaml (hybrid fusion wired)
+
+tasks:
+  # ============================================
+  # P3-T1a: Add tantivy dep and LexicalIndex struct
+  # ============================================
+  - name: p3-t1a-lexical-index-struct
+    priority: P1
+    prompt: |
+      Add tantivy and create the LexicalIndex struct with create/open methods.
+
+      Add `tantivy = "0.22"` to Cargo.toml. Create src/lexical/mod.rs with:
+
+      ```rust
+      pub struct LexicalIndex { index: tantivy::Index, reader: tantivy::IndexReader }
+      ```
+
+      Implement LexicalIndex::create(path) and LexicalIndex::open(path).
+      Schema: id (STRING stored), content (TEXT), relative_path (STRING stored),
+      start_line (U64 stored), end_line (U64 stored), language (STRING stored).
+
+      Add `pub mod lexical;` to src/lib.rs. Store indexes in
+      `~/.cache/rclaude-context/lexical-indexes/<sha256-of-path>/`.
+      See src/mcp/manifest.rs line 310 for the cache directory pattern.
+    verify_command: cd contrib/RClaude-Context && cargo check 2>&1 | tail -5
+
+  # ============================================
+  # P3-T1b: Add insert, delete, search, clear methods
+  # ============================================
+  - name: p3-t1b-lexical-index-methods
+    priority: P1
+    dependencies:
+      - p3-t1a-lexical-index-struct
+    prompt: |
+      Add insert, delete, search, and clear methods to LexicalIndex in src/lexical/mod.rs.
+
+      Methods to implement:
+      - insert_chunks(&self, chunks: &[CodeChunk]) — index chunks, commit after
+      - delete_by_paths(&self, relative_paths: &[String]) — delete by path
+      - search(&self, query: &str, limit: usize) -> Vec<HybridHit> — BM25 search
+        using tantivy QueryParser on the content field
+      - clear(&self) — delete all documents
+
+      HybridHit is defined in src/mcp/hybrid.rs line 7.
+      CodeChunk is defined in src/types.rs.
+      Use default tantivy tokenizer. Keep it simple.
+    verify_command: cd contrib/RClaude-Context && cargo check 2>&1 | tail -5
+
+  # ============================================
+  # P3-T2: Wire lexical index into indexer pipeline
+  # ============================================
+  - name: p3-t2-wire-lexical-into-indexer
+    priority: P1
+    dependencies:
+      - p3-t1b-lexical-index-methods
+    prompt: |
+      Wire LexicalIndex into the indexing pipeline.
+
+      In src/mcp/indexer.rs after splitting (Phase 2), open/create the
+      LexicalIndex for the codebase path and insert all_chunks.
+      Use spawn_blocking for tantivy calls (blocking IO).
+
+      In src/mcp/tools.rs clear_index handler, also clear the lexical index.
+
+      Reference: src/mcp/indexer.rs Phase 4 at line 301,
+      src/mcp/tools.rs clear_index at line 381.
+    verify_command: cd contrib/RClaude-Context && cargo check 2>&1 | tail -5
+
+  # ============================================
+  # P3-T3: Wire lexical search into search_code
+  # ============================================
+  - name: p3-t3-wire-lexical-into-search
+    priority: P1
+    dependencies:
+      - p3-t2-wire-lexical-into-indexer
+    prompt: |
+      Wire lexical search into the search_code hybrid pipeline.
+
+      In src/mcp/tools.rs search_code:
+      1. Open LexicalIndex for the codebase path
+      2. Call search(query, limit * 3) to get keyword matches
+      3. Pass results as lexical_hits to fuse_hybrid_hits() (currently empty vec)
+
+      Fall back to empty lexical hits if index doesn't exist yet.
+      Reference: src/mcp/tools.rs search_code, src/mcp/hybrid.rs fuse_hybrid_hits.
+    verify_command: cd contrib/RClaude-Context && cargo test 2>&1 | tail -5
+
+  # ============================================
+  # P3-T4a: Test insert and search
+  # ============================================
+  - name: p3-t4a-test-lexical-insert-search
+    priority: P1
+    dependencies:
+      - p3-t1b-lexical-index-methods
+    prompt: |
+      Add tests for LexicalIndex insert and search in src/lexical/mod.rs.
+
+      Test cases:
+      1. test_insert_and_search — insert 3 CodeChunks, search for keyword
+         in one, assert it's returned with score > 0
+      2. test_search_empty_index — search empty index, assert empty results
+      3. test_bm25_ranks_exact_match_higher — insert "fn calculate_score"
+         and "score is computed", search "calculate_score", assert exact first
+
+      Use tempfile::TempDir for index directories.
+    verify_command: cd contrib/RClaude-Context && cargo test lexical 2>&1 | tail -10
+
+  # ============================================
+  # P3-T4b: Test delete and clear
+  # ============================================
+  - name: p3-t4b-test-lexical-delete-clear
+    priority: P1
+    dependencies:
+      - p3-t1b-lexical-index-methods
+    prompt: |
+      Add tests for LexicalIndex delete and clear in src/lexical/mod.rs.
+
+      Test cases:
+      1. test_delete_by_paths — insert 3 chunks from different files,
+         delete one file's path, assert its content gone, others remain
+      2. test_clear — insert chunks, call clear(), assert search returns empty
+
+      Use tempfile::TempDir for index directories.
+    verify_command: cd contrib/RClaude-Context && cargo test lexical 2>&1 | tail -10
+
+  # ============================================
+  # PHASE GATE
+  # ============================================
+  - name: p3-gate-bm25-complete
+    priority: P0
+    dependencies:
+      - p3-t1a-lexical-index-struct
+      - p3-t1b-lexical-index-methods
+      - p3-t2-wire-lexical-into-indexer
+      - p3-t3-wire-lexical-into-search
+      - p3-t4a-test-lexical-insert-search
+      - p3-t4b-test-lexical-delete-clear
+    prompt: |
+      Phase 3 Gate: Verify BM25 lexical search is integrated.
+
+      Checks: cargo test passes, tantivy in Cargo.toml, src/lexical/mod.rs
+      exists, search_code uses fuse_hybrid_hits with lexical hits.
+
+      If all pass, print "PHASE 3 COMPLETE — hybrid BM25+vector search live"
+    verify_command: |
+      cd contrib/RClaude-Context && cargo test 2>&1 | tail -3 && test -f src/lexical/mod.rs && grep -q "tantivy" Cargo.toml && echo "PHASE 3 GATE PASSED"

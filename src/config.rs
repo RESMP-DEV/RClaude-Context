@@ -3,11 +3,11 @@ use std::env;
 
 /// Supported file extensions for indexing (without leading dot).
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "py", "rs", "js", "ts", "tsx", "jsx", "go", "java", "cpp", "cc", "cxx", "c", "h", "hpp",
-    "rb", "php", "swift", "kt", "scala", "cs", "fs", "ml", "mli", "hs", "lua", "sh", "bash",
-    "zsh", "pl", "pm", "r", "jl", "ex", "exs", "erl", "hrl", "clj", "cljs", "lisp", "el",
-    "vim", "sql", "graphql", "proto", "thrift", "yaml", "yml", "toml", "json", "xml",
-    "html", "css", "scss", "sass", "less", "md", "rst", "tex",
+    "py", "rs", "js", "ts", "tsx", "jsx", "go", "java", "cpp", "cc", "cxx", "c", "h", "hpp", "rb",
+    "php", "swift", "kt", "scala", "cs", "fs", "ml", "mli", "hs", "lua", "sh", "bash", "zsh", "pl",
+    "pm", "r", "jl", "ex", "exs", "erl", "hrl", "clj", "cljs", "lisp", "el", "vim", "sql",
+    "graphql", "proto", "thrift", "yaml", "yml", "toml", "json", "xml", "html", "css", "scss",
+    "sass", "less", "md", "rst", "tex",
 ];
 
 /// Extensionless files to include.

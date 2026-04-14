@@ -90,8 +90,11 @@ impl CodeSplitter {
 
         let raw_chunks = extract_chunks(&tree, &source, node_types, path, &relative_path, language);
 
-        let refined_chunks =
-            refine_chunks(raw_chunks, self.config.max_chunk_bytes, self.config.overlap_lines);
+        let refined_chunks = refine_chunks(
+            raw_chunks,
+            self.config.max_chunk_bytes,
+            self.config.overlap_lines,
+        );
 
         Ok(refined_chunks)
     }

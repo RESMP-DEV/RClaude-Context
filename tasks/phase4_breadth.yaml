@@ -1,0 +1,198 @@
+# Phase 4: Breadth Enhancements
+#
+# Independent tasks that expand language support, embedding providers,
+# and cloud connectivity. All parallelizable — no inter-dependencies.
+#
+# SCOPE: contrib/RClaude-Context only.
+# DEPENDS ON: None (independent of Phases 1-3, but best done after Phase 1)
+
+tasks:
+  # ============================================
+  # P4-T1: Add tree-sitter grammars for 6 languages
+  # ============================================
+  - name: p4-t1-add-language-grammars
+    priority: P2
+    prompt: |
+      Add tree-sitter language grammars for Ruby, PHP, Swift, Kotlin, Scala, C#.
+
+      CONTEXT:
+      The upstream claude-context supports 14 languages. RClaude-Context has 9:
+      Python, JavaScript, TypeScript, TSX, Rust, Go, Java, C++, C.
+      Missing: Ruby, PHP, Swift, Kotlin, Scala, C#.
+
+      TASK:
+
+      1. Add to Cargo.toml [dependencies]:
+         ```toml
+         tree-sitter-ruby = "0.23"
+         tree-sitter-php = "0.23"
+         tree-sitter-swift = "0.5"
+         tree-sitter-kotlin = "0.3"
+         tree-sitter-scala = "0.23"
+         tree-sitter-c-sharp = "0.23"
+         ```
+         NOTE: Version numbers may differ — use `cargo search tree-sitter-<lang>`
+         to find the latest compatible version. Some grammars may use 0.2x or
+         different major versions. If a grammar doesn't exist on crates.io,
+         skip it and document which languages were skipped.
+
+      2. Update src/splitter/parsers.rs:
+         - Add parser initialization for each new language
+         - Map file extensions: .rb → Ruby, .php → PHP, .swift → Swift,
+           .kt → Kotlin, .scala → Scala, .cs → C#
+
+      3. Update src/splitter/node_types.rs:
+         - Add splittable AST node types for each language:
+           - Ruby: method_definition, class_definition, module_definition
+           - PHP: function_definition, class_declaration, method_declaration
+           - Swift: function_declaration, class_declaration, struct_declaration,
+             enum_declaration, protocol_declaration
+           - Kotlin: function_declaration, class_declaration, object_declaration
+           - Scala: function_definition, class_definition, object_definition, trait_definition
+           - C#: method_declaration, class_declaration, struct_declaration,
+             interface_declaration, namespace_declaration
+
+      4. Add the new extensions to SUPPORTED_EXTENSIONS in src/config.rs
+         (rb, php, swift, kt, scala, cs should already be there — verify)
+
+      5. Run `cargo test splitter` to verify parser initialization works
+
+      REFERENCE:
+      - src/splitter/parsers.rs (existing parser init pattern)
+      - src/splitter/node_types.rs (existing node type definitions)
+      - src/config.rs SUPPORTED_EXTENSIONS (line 5)
+    verify_command: cd contrib/RClaude-Context && cargo test splitter 2>&1 | tail -10
+
+  # ============================================
+  # P4-T2: Zilliz Cloud token auth support
+  # ============================================
+  - name: p4-t2-zilliz-cloud-auth
+    priority: P2
+    prompt: |
+      Add Zilliz Cloud connection support via Bearer token authentication.
+
+      CONTEXT:
+      The Milvus REST API is the same for local Milvus and Zilliz Cloud.
+      The only difference: Zilliz Cloud requires a Bearer token in the
+      Authorization header.
+
+      TASK:
+
+      1. Add to Config in src/config.rs:
+         ```rust
+         pub milvus_token: Option<String>,
+         ```
+         Load from MILVUS_TOKEN env var (None if unset).
+
+      2. Modify MilvusClient in src/vectordb/client.rs:
+         - Add optional token field:
+           ```rust
+           token: Option<String>,
+           ```
+         - Update constructor: `MilvusClient::new(base_url, token: Option<String>)`
+         - In every HTTP request, if token is Some, add header:
+           `Authorization: Bearer <token>`
+         - Use a reqwest::Client with default headers to avoid repeating:
+           ```rust
+           let mut headers = HeaderMap::new();
+           if let Some(token) = &self.token {
+               headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse()?);
+           }
+           let client = Client::builder().default_headers(headers).build()?;
+           ```
+
+      3. Update all MilvusClient::new() call sites to pass the token:
+         - src/mcp/state.rs (ContextState::new)
+         - src/mcp/tools.rs (build_indexer_state)
+         - Any test code (pass None for tests)
+
+      4. Update Config::from_env() to read MILVUS_TOKEN
+
+      Do NOT change the Milvus REST API URLs or request bodies.
+      The API is identical — only auth headers differ.
+    verify_command: cd contrib/RClaude-Context && cargo check 2>&1 | tail -5
+
+  # ============================================
+  # P4-T3: Multiple embedding provider support
+  # ============================================
+  - name: p4-t3-embedding-providers
+    priority: P2
+    prompt: |
+      Support multiple embedding providers beyond the current single HTTP endpoint.
+
+      CONTEXT:
+      The upstream claude-context supports OpenAI, VoyageAI, Ollama, and Gemini.
+      Most are OpenAI-compatible (same request/response format).
+
+      TASK:
+
+      1. Add to Config in src/config.rs:
+         ```rust
+         pub embedding_api_key: Option<String>,
+         ```
+         Load from EMBEDDING_API_KEY env var.
+
+      2. Modify EmbeddingClient in src/embedding/mod.rs:
+         - Add optional api_key field
+         - If api_key is Some, add `Authorization: Bearer <key>` header
+         - This covers: OpenAI, VoyageAI, and most compatible APIs
+
+      3. Update EmbeddingConfig:
+         ```rust
+         pub struct EmbeddingConfig {
+             pub url: String,
+             pub model: String,
+             pub batch_size: usize,
+             pub api_key: Option<String>,
+         }
+         ```
+
+      4. Update EmbeddingConfig::from_config() to include the api_key
+
+      5. Update default configs:
+         - EMBEDDING_URL default: "http://localhost:8100" (local Ollama)
+         - EMBEDDING_MODEL default: "all-minilm"
+
+      Provider-specific behavior differences:
+      - OpenAI: url=https://api.openai.com/v1, model=text-embedding-3-small
+      - VoyageAI: url=https://api.voyageai.com/v1, model=voyage-code-3
+      - Ollama: url=http://localhost:11434/v1, model=all-minilm (no key needed)
+      - All use the same /embeddings POST format (OpenAI-compatible)
+
+      Do NOT add provider enums or complex abstractions.
+      The OpenAI-compatible format + optional Bearer auth covers all providers.
+    verify_command: cd contrib/RClaude-Context && cargo check 2>&1 | tail -5
+
+  # ============================================
+  # P4-T4: Add Markdown and YAML splitter fallback
+  # ============================================
+  - name: p4-t4-markdown-yaml-splitter
+    priority: P3
+    prompt: |
+      Add a line-based splitter fallback for non-AST languages.
+
+      CONTEXT:
+      The config lists md, rst, yaml, yml, json, xml, html, css, etc. as
+      supported extensions, but tree-sitter only handles programming languages.
+      Non-AST files currently fail to split (splitter returns error or empty).
+
+      TASK:
+
+      1. In src/splitter/mod.rs, add a fallback when tree-sitter parsing fails
+         or no grammar exists for the language:
+         - Split by line count (e.g., every chunk_size/80 lines with overlap)
+         - Use the existing refine.rs chunk splitting logic
+
+      2. For Markdown specifically, split on heading boundaries (lines starting
+         with # or ##) to keep sections together. This is a simple regex split,
+         not an AST parse.
+
+      3. For YAML/JSON/XML, use the line-based splitter.
+
+      4. The fallback should be silent — no warnings for expected non-AST files.
+         Only warn if a file that SHOULD have a grammar fails to parse.
+
+      REFERENCE:
+      - src/splitter/mod.rs (split_file method)
+      - src/splitter/refine.rs (chunk splitting logic)
+    verify_command: cd contrib/RClaude-Context && cargo test splitter 2>&1 | tail -10

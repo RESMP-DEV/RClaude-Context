@@ -192,7 +192,9 @@ impl MilvusClient {
         if response.code != 0 {
             anyhow::bail!(
                 "create collection failed: {}",
-                response.message.unwrap_or_else(|| "unknown error".to_string())
+                response
+                    .message
+                    .unwrap_or_else(|| "unknown error".to_string())
             );
         }
 
@@ -222,7 +224,9 @@ impl MilvusClient {
         if response.code != 0 {
             anyhow::bail!(
                 "has collection failed: {}",
-                response.message.unwrap_or_else(|| "unknown error".to_string())
+                response
+                    .message
+                    .unwrap_or_else(|| "unknown error".to_string())
             );
         }
 
@@ -267,7 +271,9 @@ impl MilvusClient {
         if response.code != 0 {
             anyhow::bail!(
                 "insert failed: {}",
-                response.message.unwrap_or_else(|| "unknown error".to_string())
+                response
+                    .message
+                    .unwrap_or_else(|| "unknown error".to_string())
             );
         }
 
@@ -294,7 +300,11 @@ impl MilvusClient {
             data: vec![vector.to_vec()],
             anns_field: "vector".to_string(),
             limit: top_k,
-            output_fields: vec!["id".to_string(), "content".to_string(), "metadata".to_string()],
+            output_fields: vec![
+                "id".to_string(),
+                "content".to_string(),
+                "metadata".to_string(),
+            ],
         };
 
         let response: SearchResponse = self
@@ -311,7 +321,9 @@ impl MilvusClient {
         if response.code != 0 {
             anyhow::bail!(
                 "search failed: {}",
-                response.message.unwrap_or_else(|| "unknown error".to_string())
+                response
+                    .message
+                    .unwrap_or_else(|| "unknown error".to_string())
             );
         }
 
@@ -359,7 +371,9 @@ impl MilvusClient {
         if response.code != 0 {
             anyhow::bail!(
                 "delete failed: {}",
-                response.message.unwrap_or_else(|| "unknown error".to_string())
+                response
+                    .message
+                    .unwrap_or_else(|| "unknown error".to_string())
             );
         }
 
@@ -398,7 +412,9 @@ impl MilvusClient {
         if response.code != 0 {
             anyhow::bail!(
                 "insert batch failed: {}",
-                response.message.unwrap_or_else(|| "unknown error".to_string())
+                response
+                    .message
+                    .unwrap_or_else(|| "unknown error".to_string())
             );
         }
 
@@ -475,7 +491,9 @@ impl MilvusClient {
         if response.code != 0 {
             anyhow::bail!(
                 "drop collection failed: {}",
-                response.message.unwrap_or_else(|| "unknown error".to_string())
+                response
+                    .message
+                    .unwrap_or_else(|| "unknown error".to_string())
             );
         }
 

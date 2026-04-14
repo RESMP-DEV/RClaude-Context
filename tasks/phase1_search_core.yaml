@@ -1,0 +1,221 @@
+# Phase 1: Make Search Work
+#
+# The search_code MCP tool currently returns empty results.
+# These tasks wire the existing Milvus client and SharedState
+# into the tool handler so search actually works.
+#
+# SCOPE: contrib/RClaude-Context only.
+# All file paths are relative to contrib/RClaude-Context.
+
+tasks:
+  # ============================================
+  # P1-T1: Clean up stale searcher.rs module
+  # ============================================
+  - name: p1-t1-remove-stale-searcher
+    priority: P1
+    prompt: |
+      Clean up the stale searcher.rs module in src/mcp/searcher.rs.
+
+      PROBLEM:
+      src/mcp/searcher.rs contains duplicate types that shadow the real
+      implementations used everywhere else:
+      - Its own EmbeddingClient (duplicates src/embedding/mod.rs)
+      - Its own MilvusClient (duplicates src/vectordb/client.rs)
+      - Its own ContextState (duplicates src/mcp/state.rs)
+      - Its own SearchParams (not used by any tool)
+
+      These are dead code from an early prototype. The actual search logic
+      lives in src/mcp/state.rs (ContextState::search method at line 185).
+
+      TASK:
+      1. Delete src/mcp/searcher.rs entirely
+      2. Remove `pub mod searcher;` from src/mcp/mod.rs
+      3. Remove the `pub use searcher::` re-exports from src/mcp/mod.rs
+      4. Run `cargo check` to verify nothing depended on it
+      5. If anything breaks, move only the needed types into state.rs
+
+      CONTEXT FILES:
+      - src/mcp/searcher.rs (delete this)
+      - src/mcp/mod.rs (update re-exports)
+      - src/mcp/state.rs (has the real search impl at line 185)
+      - src/mcp/tools.rs (does NOT import from searcher)
+    verify_command: cd contrib/RClaude-Context && cargo check 2>&1 | tail -5
+
+  # ============================================
+  # P1-T2: Auto-create Milvus collection on index
+  # ============================================
+  - name: p1-t2-ensure-collection-on-index
+    priority: P1
+    prompt: |
+      Ensure the Milvus collection exists before inserting vectors during indexing.
+
+      PROBLEM:
+      The indexer in src/mcp/indexer.rs jumps straight to embedding and inserting
+      without checking whether the target Milvus collection exists. First-time
+      indexing against a fresh Milvus instance will fail with a "collection not found"
+      error.
+
+      TASK:
+      Add a collection-existence check at the start of index_codebase() in
+      src/mcp/indexer.rs, after computing the collection_name (line 151) and
+      before Phase 2 (splitting):
+
+      1. Call milvus_client.has_collection(&collection_name).await
+      2. If collection does not exist, call milvus_client.create_collection(
+           &collection_name, config.embedding_dimension).await
+      3. On failure, call update_status_failed() and return the error
+
+      The MilvusClient already has both has_collection() and create_collection()
+      methods in src/vectordb/client.rs. The state already has milvus_client
+      accessible via state.milvus_client.
+
+      REFERENCE:
+      - src/mcp/state.rs:257-268 has ensure_collection() that does exactly this
+      - Reuse that pattern but inline it into indexer.rs since indexer uses its
+        own ContextState (not SharedState)
+
+      Do NOT add new dependencies. The existing MilvusClient API is sufficient.
+    verify_command: cd contrib/RClaude-Context && cargo check 2>&1 | tail -5
+
+  # ============================================
+  # P1-T3: Wire search_code tool to SharedState
+  # ============================================
+  - name: p1-t3-wire-search-tool
+    priority: P0
+    dependencies:
+      - p1-t1-remove-stale-searcher
+    prompt: |
+      Wire the search_code MCP tool to actually perform vector search.
+
+      PROBLEM:
+      The search_code tool in src/mcp/tools.rs (line 337-358) is a TODO stub
+      that returns empty results:
+        ```rust
+        // TODO: Implement actual search logic
+        Ok(Json(SearchResults { results: vec![], count: 0 }))
+        ```
+
+      TASK:
+      Replace the TODO with a real implementation using self.state (SharedState):
+
+      1. Call self.state.search() which is defined in src/mcp/state.rs:185-239
+         - collection name: use collection_name_from_path(&path) from vectordb module
+         - query: params.query
+         - limit: params.limit as usize
+
+      2. Convert the Vec<state::SearchResult> into Vec<tools::SearchResultItem>:
+         - SearchResult has .chunk (CodeChunk) and .score (f32)
+         - Map chunk fields to SearchResultItem fields:
+           - file_path: chunk.file_path
+           - relative_path: chunk.relative_path
+           - content: chunk.content
+           - start_line: chunk.start_line
+           - end_line: chunk.end_line
+           - language: chunk.language
+           - score: result.score
+
+      3. Return SearchResults { results, count: results.len() }
+
+      4. Handle errors by converting anyhow::Error to McpError::internal_error
+
+      IMPORTS NEEDED:
+      - use crate::vectordb::collection_name_from_path; (already imported)
+
+      REFERENCE FILES:
+      - src/mcp/tools.rs (modify search_code at line 337)
+      - src/mcp/state.rs (search method at line 185)
+      - src/vectordb/client.rs (MilvusClient::search at line 289)
+    verify_command: cd contrib/RClaude-Context && cargo check 2>&1 | tail -5
+
+  # ============================================
+  # P1-T4: Add search_code unit tests
+  # ============================================
+  - name: p1-t4-search-tool-tests
+    priority: P1
+    dependencies:
+      - p1-t3-wire-search-tool
+    prompt: |
+      Add unit tests for the wired search_code tool in src/mcp/tools.rs.
+
+      TASK:
+      Add tests to the existing #[cfg(test)] mod tests block in src/mcp/tools.rs.
+      Use the existing spawn_mock_milvus_server() helper (already in the file)
+      to mock Milvus responses.
+
+      TEST CASES:
+
+      1. test_search_code_returns_results_from_milvus
+         - Spawn mock Milvus that returns a search response with 2 hits
+         - Mock embedding server that returns a vector for the query
+         - Create CodebaseTools with config pointing to mock servers
+         - Call search_code with a query
+         - Assert results.count == 2
+         - Assert results.results[0] has expected file_path, content, score
+
+      2. test_search_code_rejects_zero_limit
+         - Already exists implicitly (line 346-350)
+         - Verify the error message
+
+      3. test_search_code_rejects_nonexistent_path
+         - Call with path="/nonexistent/path"
+         - Assert error contains "does not exist"
+
+      MOCK RESPONSE FORMAT for Milvus search:
+      The search endpoint POST /v2/vectordb/entities/search returns:
+      ```json
+      {
+        "code": 0,
+        "data": [[
+          {
+            "id": "chunk-1",
+            "distance": 0.95,
+            "content": "fn main() {}",
+            "metadata": {
+              "file_path": "/repo/src/main.rs",
+              "relative_path": "src/main.rs",
+              "start_line": 1,
+              "end_line": 3,
+              "language": "rust"
+            }
+          }
+        ]]
+      }
+      ```
+
+      MOCK RESPONSE FORMAT for embedding:
+      POST to the embedding URL returns:
+      ```json
+      {
+        "data": [{"embedding": [0.1, 0.2, 0.3]}],
+        "model": "test",
+        "usage": {"prompt_tokens": 5, "total_tokens": 5}
+      }
+      ```
+
+      Reuse the MockMilvusServer pattern but extend it to handle
+      both embedding and Milvus endpoints (may need two mock servers).
+    verify_command: cd contrib/RClaude-Context && cargo test search_code 2>&1 | tail -10
+
+  # ============================================
+  # PHASE GATE
+  # ============================================
+  - name: p1-gate-search-works
+    priority: P0
+    dependencies:
+      - p1-t1-remove-stale-searcher
+      - p1-t2-ensure-collection-on-index
+      - p1-t3-wire-search-tool
+      - p1-t4-search-tool-tests
+    prompt: |
+      Phase 1 Gate: Verify search_code is fully wired and tested.
+
+      CHECKS:
+      1. `cargo check` succeeds with no warnings about unused imports
+      2. `cargo test` passes all tests including new search tests
+      3. src/mcp/searcher.rs no longer exists (stale module removed)
+      4. The search_code tool in src/mcp/tools.rs no longer contains "TODO"
+      5. grep for "TODO" in src/mcp/tools.rs returns nothing
+
+      If all pass, print "PHASE 1 COMPLETE — search_code is live"
+    verify_command: |
+      cd contrib/RClaude-Context && cargo test 2>&1 | tail -3 && ! grep -q "TODO" src/mcp/tools.rs && echo "PHASE 1 GATE PASSED"

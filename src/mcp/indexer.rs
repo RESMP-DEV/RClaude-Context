@@ -16,7 +16,9 @@ use rayon::prelude::*;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, instrument, warn};
 
+use crate::config::Config;
 use crate::embedding::EmbeddingClient;
+use crate::mcp::manifest::ManifestStore;
 use crate::splitter::CodeSplitter;
 use crate::types::{CodeChunk, IndexState, IndexStatus};
 use crate::vectordb::{collection_name_from_path, InsertRow, MilvusClient};
@@ -50,6 +52,8 @@ pub struct IndexResult {
 
 /// Shared state for the context server, including indexing status.
 pub struct ContextState {
+    /// Configuration used for this indexing run.
+    pub config: Arc<Config>,
     /// Current indexing status, updated throughout the process.
     pub indexing_status: Arc<RwLock<IndexStatus>>,
     /// Code walker for discovering files.
@@ -60,22 +64,28 @@ pub struct ContextState {
     pub embedding_client: Arc<EmbeddingClient>,
     /// Milvus client for vector storage.
     pub milvus_client: Arc<MilvusClient>,
+    /// Machine-local manifest persistence for completed full indexes.
+    pub manifest_store: Arc<ManifestStore>,
 }
 
 impl ContextState {
     /// Create a new context state with the given components.
     pub fn new(
+        config: Config,
         walker: CodeWalker,
         splitter: CodeSplitter,
         embedding_client: EmbeddingClient,
         milvus_client: MilvusClient,
+        manifest_store: Arc<ManifestStore>,
     ) -> Self {
         Self {
+            config: Arc::new(config),
             indexing_status: Arc::new(RwLock::new(IndexStatus::default())),
             walker: Arc::new(walker),
             splitter: Arc::new(splitter),
             embedding_client: Arc::new(embedding_client),
             milvus_client: Arc::new(milvus_client),
+            manifest_store,
         }
     }
 
@@ -102,11 +112,7 @@ impl ContextState {
 /// * `Ok(IndexResult)` - Summary of the indexing operation
 /// * `Err` - If any critical error occurs
 #[instrument(skip(state), fields(path = %path.display()))]
-pub async fn index_codebase(
-    state: &ContextState,
-    path: &Path,
-    force: bool,
-) -> Result<IndexResult> {
+pub async fn index_codebase(state: &ContextState, path: &Path, force: bool) -> Result<IndexResult> {
     let start = Instant::now();
     let mut warnings = Vec::new();
 
@@ -142,6 +148,7 @@ pub async fn index_codebase(
 
     let total_files = files.len();
     info!("Discovered {} files to index", total_files);
+    let collection_name = collection_name_from_path(path);
 
     {
         let mut status = state.indexing_status.write().await;
@@ -149,6 +156,10 @@ pub async fn index_codebase(
     }
 
     if total_files == 0 {
+        state
+            .manifest_store
+            .write_for_files(path, &collection_name, &state.config, &files)
+            .with_context(|| format!("Failed to write manifest for {}", path.display()))?;
         update_status_completed(state, 0).await;
         return Ok(IndexResult {
             files_processed: 0,
@@ -216,6 +227,10 @@ pub async fn index_codebase(
     }
 
     if total_chunks == 0 {
+        state
+            .manifest_store
+            .write_for_files(path, &collection_name, &state.config, &files)
+            .with_context(|| format!("Failed to write manifest for {}", path.display()))?;
         update_status_completed(state, 0).await;
         return Ok(IndexResult {
             files_processed: total_files,
@@ -287,8 +302,6 @@ pub async fn index_codebase(
     let milvus_client = state.milvus_client.clone();
     let mut vectors_inserted = 0;
 
-    // Generate collection name from path
-    let collection_name = collection_name_from_path(path);
     info!("Using collection: {}", collection_name);
 
     // Convert chunks + embeddings to InsertRows
@@ -354,6 +367,11 @@ pub async fn index_codebase(
     }
 
     info!("Inserted {} vectors into Milvus", vectors_inserted);
+
+    state
+        .manifest_store
+        .write_for_files(path, &collection_name, &state.config, &files)
+        .with_context(|| format!("Failed to write manifest for {}", path.display()))?;
 
     // Update final status
     update_status_completed(state, total_chunks).await;

@@ -11,6 +11,7 @@ use dashmap::DashMap;
 
 use crate::config::Config;
 use crate::embedding::EmbeddingClient;
+use crate::mcp::manifest::ManifestStore;
 use crate::splitter::CodeSplitter;
 use crate::types::{CodeChunk, EmbeddingVector, IndexState, IndexStatus};
 use crate::vectordb::MilvusClient;
@@ -61,6 +62,8 @@ pub struct ContextState {
     pub embedding_client: EmbeddingClient,
     /// Client for Milvus vector database operations.
     pub milvus_client: MilvusClient,
+    /// Machine-local manifest storage for completed full indexes.
+    pub manifest_store: Arc<ManifestStore>,
     /// Current indexing status for each path being processed.
     pub indexing_status: DashMap<PathBuf, IndexStatus>,
     /// Code splitter for parsing and chunking source files.
@@ -90,6 +93,7 @@ impl ContextState {
             config,
             embedding_client,
             milvus_client,
+            manifest_store: Arc::new(ManifestStore::default()),
             indexing_status: DashMap::new(),
             splitter,
         }

@@ -77,7 +77,10 @@ impl CodeWalker {
                 if let Ok(entry) = entry {
                     if entry.file_type().map_or(false, |ft| ft.is_file()) {
                         if let Some(ext) = entry.path().extension() {
-                            if extensions.iter().any(|e| e == ext.to_string_lossy().as_ref()) {
+                            if extensions
+                                .iter()
+                                .any(|e| e == ext.to_string_lossy().as_ref())
+                            {
                                 files.lock().unwrap().push(entry.into_path());
                             }
                         }

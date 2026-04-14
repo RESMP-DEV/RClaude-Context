@@ -1,0 +1,199 @@
+# Phase 2: Hybrid Search & Incremental Indexing
+#
+# With search_code wired (Phase 1), integrate the hybrid RRF fusion
+# and manifest-based incremental indexing that are already implemented
+# but not connected to the tool layer.
+#
+# SCOPE: contrib/RClaude-Context only.
+# DEPENDS ON: phase1_search_core.yaml (all tasks complete)
+
+tasks:
+  # ============================================
+  # P2-T1: Wire hybrid fusion into search_code
+  # ============================================
+  - name: p2-t1-wire-hybrid-search
+    priority: P1
+    dependencies:
+      - p1-gate-search-works
+    prompt: |
+      Integrate hybrid RRF fusion into the search_code MCP tool.
+
+      CONTEXT:
+      src/mcp/hybrid.rs has a tested fuse_hybrid_hits() function that merges
+      vector (dense) and lexical hits using Reciprocal Rank Fusion. It is
+      currently unused by any tool. The search_code tool (Phase 1) does
+      vector-only search.
+
+      TASK:
+      Restructure search_code in src/mcp/tools.rs to use hybrid fusion:
+
+      1. Perform vector search via self.state.search() (already wired in Phase 1)
+         - Convert results to Vec<HybridHit>
+
+      2. For now, pass an empty Vec<HybridHit> as lexical_hits
+         (BM25 will be added in Phase 3)
+
+      3. Call fuse_hybrid_hits(query, vector_hits, lexical_hits, &options)
+         - Use HybridFusionOptions::default()
+
+      4. Convert Vec<HybridSearchResult> to Vec<SearchResultItem>
+
+      5. Add an optional "extensions" parameter to SearchCodeParams:
+         ```rust
+         #[serde(default)]
+         pub extensions: Vec<String>,
+         ```
+         Pass this to HybridFusionOptions.extension_filter
+
+      IMPORTS NEEDED:
+      - use crate::mcp::hybrid::{fuse_hybrid_hits, HybridFusionOptions, HybridHit};
+
+      IMPORTANT: The hybrid fusion is a pure function — no network calls.
+      The existing hybrid_search_test.rs tests validate the fusion logic.
+      This task only wires it into the tool handler.
+
+      REFERENCE FILES:
+      - src/mcp/hybrid.rs (fuse_hybrid_hits at line 73)
+      - src/mcp/tools.rs (search_code method)
+      - tests/hybrid_search_test.rs (existing tests)
+    verify_command: cd contrib/RClaude-Context && cargo test 2>&1 | tail -5
+
+  # ============================================
+  # P2-T2: Wire incremental indexing via manifests
+  # ============================================
+  - name: p2-t2-wire-incremental-indexing
+    priority: P1
+    dependencies:
+      - p1-gate-search-works
+    prompt: |
+      Wire manifest-based incremental indexing into index_codebase.
+
+      CONTEXT:
+      src/mcp/manifest.rs has a complete manifest system:
+      - ManifestStore persists SHA-256 file fingerprints per codebase
+      - diff_manifest_against_files() detects added/modified/deleted files
+      - IndexManifest.matches_index_inputs() validates config compatibility
+      All tested in tests/index_manifest_test.rs.
+
+      But the indexer in src/mcp/indexer.rs always does a FULL reindex.
+
+      TASK:
+      Modify index_codebase() in src/mcp/indexer.rs to support incremental mode:
+
+      1. After walking files (Phase 1, line ~141), check for existing manifest:
+         ```rust
+         let previous_manifest = state.manifest_store.load(path)?;
+         ```
+
+      2. If a previous manifest exists AND matches_index_inputs() AND !force:
+         a. Compute diff: diff_manifest_against_files(&previous, path, &collection_name, &config, &files)
+         b. If diff is empty (no changes): return early with "already up to date"
+         c. Filter files list to only added + modified files for splitting/embedding
+         d. Delete vectors for deleted + modified files from Milvus:
+            - Build filter: `id in ["chunk-id-1", "chunk-id-2"]`
+            - Call milvus_client.delete(&collection_name, &filter)
+            - For deleted files, the chunk IDs are derived from the file path
+              (the chunk ID format includes the file path — check types.rs)
+
+      3. If no previous manifest OR !matches OR force: full reindex (current behavior)
+
+      4. After successful index (both incremental and full), write new manifest:
+         ```rust
+         state.manifest_store.write_for_files(path, &collection_name, &config, &files)?;
+         ```
+         This is already done at line 372 — verify it covers both paths.
+
+      CHALLENGE: Identifying chunk IDs for deletion. The chunk ID is generated
+      during splitting (uuid::Uuid::new_v4), NOT derived from file path. This
+      means we can't know what IDs to delete without querying Milvus.
+
+      SOLUTION: Use Milvus metadata filter instead of ID filter:
+      ```
+      metadata["relative_path"] in ["path/to/deleted.rs", "path/to/modified.rs"]
+      ```
+      Check if the Milvus REST API delete endpoint supports JSON field filters.
+      If not, the simplest approach is to drop and recreate the collection for
+      modified files (less efficient but correct).
+
+      REFERENCE FILES:
+      - src/mcp/indexer.rs (index_codebase at line 115)
+      - src/mcp/manifest.rs (ManifestStore, diff functions)
+      - src/vectordb/client.rs (delete method at line 351)
+      - tests/index_manifest_test.rs (existing manifest tests)
+    verify_command: cd contrib/RClaude-Context && cargo check 2>&1 | tail -5
+
+  # ============================================
+  # P2-T3: Test incremental skip for unchanged files
+  # ============================================
+  - name: p2-t3-test-incremental-skip
+    priority: P1
+    dependencies:
+      - p2-t2-wire-incremental-indexing
+    prompt: |
+      Add a unit test verifying incremental indexing skips unchanged files.
+
+      TASK:
+      Add test_reindex_skips_unchanged_files to the #[cfg(test)] mod in
+      src/mcp/indexer.rs.
+
+      TEST:
+      1. Create temp dir with 2 source files
+      2. Build a ContextState with mock Milvus and embedding servers
+         (use the spawn_mock_milvus_server pattern from src/mcp/tools.rs)
+      3. Call index_codebase(&state, &path, false) — full index
+      4. Call index_codebase(&state, &path, false) again without changes
+      5. Assert the second call returns Ok with chunks_created == 0 or
+         returns early with an "already up to date" message
+      6. Verify the manifest file exists after both runs
+
+      Keep the test self-contained. Use tempfile::TempDir.
+    verify_command: cd contrib/RClaude-Context && cargo test reindex_skips 2>&1 | tail -10
+
+  # ============================================
+  # P2-T4: Test force reindex ignores manifest
+  # ============================================
+  - name: p2-t4-test-force-reindex
+    priority: P1
+    dependencies:
+      - p2-t2-wire-incremental-indexing
+    prompt: |
+      Add a unit test verifying force=true bypasses manifest and reindexes fully.
+
+      TASK:
+      Add test_force_reindex_ignores_manifest to the #[cfg(test)] mod in
+      src/mcp/indexer.rs.
+
+      TEST:
+      1. Create temp dir with 2 source files
+      2. Build ContextState with mock servers
+      3. Call index_codebase(&state, &path, false) — full index
+      4. Call index_codebase(&state, &path, true) — force reindex
+      5. Assert the second call processes all files (not skipped)
+      6. Verify chunks_created > 0 on the forced run
+
+      Keep the test self-contained. Use tempfile::TempDir.
+    verify_command: cd contrib/RClaude-Context && cargo test force_reindex 2>&1 | tail -10
+
+  # ============================================
+  # PHASE GATE
+  # ============================================
+  - name: p2-gate-hybrid-incremental
+    priority: P0
+    dependencies:
+      - p2-t1-wire-hybrid-search
+      - p2-t2-wire-incremental-indexing
+      - p2-t3-test-incremental-skip
+      - p2-t4-test-force-reindex
+    prompt: |
+      Phase 2 Gate: Verify hybrid search and incremental indexing are wired.
+
+      CHECKS:
+      1. `cargo test` passes all tests (unit + integration)
+      2. search_code uses fuse_hybrid_hits (grep for it in tools.rs)
+      3. index_codebase checks manifests before reindexing (grep for manifest_store in indexer.rs)
+      4. SearchCodeParams has an extensions field
+      5. No compiler warnings
+
+      If all pass, print "PHASE 2 COMPLETE — hybrid search + incremental indexing live"
+    verify_command: |
+      cd contrib/RClaude-Context && cargo test 2>&1 | tail -3 && grep -q "fuse_hybrid_hits" src/mcp/tools.rs && grep -q "manifest_store" src/mcp/indexer.rs && echo "PHASE 2 GATE PASSED"

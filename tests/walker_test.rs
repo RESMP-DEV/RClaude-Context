@@ -182,7 +182,11 @@ fn test_respects_gitignore_directory_patterns() {
     let temp = TempDir::new().unwrap();
     init_git_repo(&temp);
 
-    create_file(&temp, ".gitignore", "target/\nnode_modules/\n__pycache__/\n");
+    create_file(
+        &temp,
+        ".gitignore",
+        "target/\nnode_modules/\n__pycache__/\n",
+    );
     create_file(&temp, "main.rs", "fn main() {}");
     create_file(&temp, "target/debug/main", "binary");
     create_file(&temp, "node_modules/lodash/index.js", "");
@@ -193,8 +197,12 @@ fn test_respects_gitignore_directory_patterns() {
 
     assert!(paths.iter().any(|p| p.ends_with("main.rs")));
     assert!(!paths.iter().any(|p| p.to_string_lossy().contains("target")));
-    assert!(!paths.iter().any(|p| p.to_string_lossy().contains("node_modules")));
-    assert!(!paths.iter().any(|p| p.to_string_lossy().contains("__pycache__")));
+    assert!(!paths
+        .iter()
+        .any(|p| p.to_string_lossy().contains("node_modules")));
+    assert!(!paths
+        .iter()
+        .any(|p| p.to_string_lossy().contains("__pycache__")));
 }
 
 #[test]
@@ -341,7 +349,9 @@ fn test_ignore_hidden_files() {
     // By default, hidden files are ignored
     assert!(paths.iter().any(|p| p.ends_with("main.rs")));
     assert!(!paths.iter().any(|p| p.ends_with(".hidden.rs")));
-    assert!(!paths.iter().any(|p| p.to_string_lossy().contains(".config")));
+    assert!(!paths
+        .iter()
+        .any(|p| p.to_string_lossy().contains(".config")));
 }
 
 #[test]
@@ -570,8 +580,12 @@ fn test_gitignore_slash_patterns() {
     let paths = collect_paths(walker);
 
     // /root_only.txt only ignores at root
-    assert!(!paths.iter().any(|p| p.ends_with("root_only.txt") && !p.to_string_lossy().contains("sub")));
-    assert!(paths.iter().any(|p| p.to_string_lossy().contains("sub/root_only.txt")));
+    assert!(!paths
+        .iter()
+        .any(|p| p.ends_with("root_only.txt") && !p.to_string_lossy().contains("sub")));
+    assert!(paths
+        .iter()
+        .any(|p| p.to_string_lossy().contains("sub/root_only.txt")));
 
     // everywhere.txt ignores everywhere
     assert!(!paths.iter().any(|p| p.ends_with("everywhere.txt")));
@@ -625,9 +639,7 @@ fn test_filter_entry_callback() {
     create_file(&temp, "another.rs", "");
 
     let mut walker = WalkBuilder::new(temp.path());
-    walker.filter_entry(|entry| {
-        !entry.file_name().to_string_lossy().starts_with("skip")
-    });
+    walker.filter_entry(|entry| !entry.file_name().to_string_lossy().starts_with("skip"));
     let paths = collect_paths(walker);
 
     assert!(paths.iter().any(|p| p.ends_with("keep.rs")));
