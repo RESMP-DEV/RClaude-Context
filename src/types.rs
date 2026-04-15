@@ -55,6 +55,12 @@ pub struct IndexStatus {
     pub processed_files: usize,
     /// Total number of code chunks created.
     pub total_chunks: usize,
+    /// Number of embeddings generated so far.
+    #[serde(default)]
+    pub embeddings_generated: usize,
+    /// Number of vectors inserted into Milvus so far.
+    #[serde(default)]
+    pub vectors_inserted: usize,
     /// Current indexing state.
     pub status: IndexState,
 }

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::splitter;
+use crate::types::IndexStatus;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IndexInputs {
@@ -110,6 +111,44 @@ impl ManifestStore {
             .with_context(|| format!("failed to write manifest {}", manifest_path.display()))?;
         Ok(())
     }
+
+    pub fn load_status(&self, path: &Path) -> Result<Option<IndexStatus>> {
+        let status_path = status_path(path);
+        if !status_path.exists() {
+            return Ok(None);
+        }
+
+        let contents = fs::read_to_string(&status_path)
+            .with_context(|| format!("failed to read status {}", status_path.display()))?;
+        let status = serde_json::from_str(&contents)
+            .with_context(|| format!("failed to parse status {}", status_path.display()))?;
+        Ok(Some(status))
+    }
+
+    pub fn write_status(&self, path: &Path, status: &IndexStatus) -> Result<()> {
+        let status_path = status_path(path);
+        if let Some(parent) = status_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create status directory {}", parent.display()))?;
+        }
+
+        let json =
+            serde_json::to_string_pretty(status).context("failed to serialize index status")?;
+        fs::write(&status_path, json)
+            .with_context(|| format!("failed to write status {}", status_path.display()))?;
+        Ok(())
+    }
+
+    pub fn clear_status(&self, path: &Path) -> Result<()> {
+        let status_path = status_path(path);
+        if !status_path.exists() {
+            return Ok(());
+        }
+
+        fs::remove_file(&status_path)
+            .with_context(|| format!("failed to remove status {}", status_path.display()))?;
+        Ok(())
+    }
 }
 
 pub fn diff_manifest_against_files(
@@ -188,6 +227,10 @@ fn manifest_path(root: &Path) -> PathBuf {
     root.join(".rust_sindexer").join("index-manifest.json")
 }
 
+fn status_path(root: &Path) -> PathBuf {
+    root.join(".rust_sindexer").join("index-status.json")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,5 +306,33 @@ mod tests {
         assert!(!manifest.matches_index_inputs("other", &inputs));
         assert_eq!(manifest.files.len(), 1);
         assert_eq!(manifest.files[0].relative_path, "src/lib.rs");
+    }
+
+    #[test]
+    fn status_store_round_trips() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        let store = ManifestStore;
+        let status = IndexStatus {
+            total_files: 10,
+            processed_files: 4,
+            total_chunks: 12,
+            embeddings_generated: 6,
+            vectors_inserted: 5,
+            status: crate::types::IndexState::Indexing,
+        };
+
+        store.write_status(root, &status).unwrap();
+        let loaded = store.load_status(root).unwrap().unwrap();
+
+        assert_eq!(loaded.total_files, 10);
+        assert_eq!(loaded.processed_files, 4);
+        assert_eq!(loaded.total_chunks, 12);
+        assert_eq!(loaded.embeddings_generated, 6);
+        assert_eq!(loaded.vectors_inserted, 5);
+        assert_eq!(loaded.status, crate::types::IndexState::Indexing);
+
+        store.clear_status(root).unwrap();
+        assert!(store.load_status(root).unwrap().is_none());
     }
 }

@@ -107,22 +107,26 @@ impl ContextState {
         self.indexing_status
             .get(&path.to_path_buf())
             .map(|r| r.clone())
+            .or_else(|| self.manifest_store.load_status(path).ok().flatten())
             .unwrap_or_default()
     }
 
     /// Update the indexing status for a path.
     pub fn set_status(&self, path: PathBuf, status: IndexStatus) {
-        self.indexing_status.insert(path, status);
+        self.indexing_status.insert(path.clone(), status.clone());
+        let _ = self.manifest_store.write_status(&path, &status);
     }
 
     /// Mark indexing as started for a path.
     pub fn start_indexing(&self, path: &Path, total_files: usize) {
-        self.indexing_status.insert(
+        self.set_status(
             path.to_path_buf(),
             IndexStatus {
                 total_files,
                 processed_files: 0,
                 total_chunks: 0,
+                embeddings_generated: 0,
+                vectors_inserted: 0,
                 status: IndexState::Indexing,
             },
         );
@@ -133,6 +137,9 @@ impl ContextState {
         if let Some(mut status) = self.indexing_status.get_mut(&path.to_path_buf()) {
             status.processed_files = processed_files;
             status.total_chunks = total_chunks;
+            let snapshot = status.clone();
+            drop(status);
+            let _ = self.manifest_store.write_status(path, &snapshot);
         }
     }
 
@@ -142,6 +149,9 @@ impl ContextState {
             status.processed_files = status.total_files;
             status.total_chunks = total_chunks;
             status.status = IndexState::Completed;
+            let snapshot = status.clone();
+            drop(status);
+            let _ = self.manifest_store.write_status(path, &snapshot);
         }
     }
 
@@ -149,6 +159,9 @@ impl ContextState {
     pub fn fail_indexing(&self, path: &Path) {
         if let Some(mut status) = self.indexing_status.get_mut(&path.to_path_buf()) {
             status.status = IndexState::Failed;
+            let snapshot = status.clone();
+            drop(status);
+            let _ = self.manifest_store.write_status(path, &snapshot);
         }
     }
 

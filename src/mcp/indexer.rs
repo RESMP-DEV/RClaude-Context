@@ -4,7 +4,8 @@
 //! 1. Walk files in parallel using ignore-based walker
 //! 2. Split files into chunks using rayon for CPU parallelism
 //! 3. Batch embed chunks (100 at a time) for efficient GPU/API utilization
-//! 4. Insert into Milvus in batches for network efficiency
+//! 4. Stream inserts into Milvus in small batches instead of buffering the
+//!    whole embedding set in memory first
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,10 +13,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use futures::stream::{FuturesUnordered, StreamExt};
 use rayon::prelude::*;
 use tokio::sync::RwLock;
 use tokio::task;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use super::manifest::{diff_manifest_against_files, IndexInputs, ManifestStore};
 use crate::embedding::EmbeddingClient;
@@ -136,8 +138,11 @@ pub async fn index_codebase(
             total_files: 0,
             processed_files: 0,
             total_chunks: 0,
+            embeddings_generated: 0,
+            vectors_inserted: 0,
             status: IndexState::Indexing,
         };
+        let _ = state.manifest_store.write_status(path, &status);
     }
 
     info!("Starting codebase indexing at {}", path.display());
@@ -153,7 +158,7 @@ pub async fn index_codebase(
     let files = match state.walker.walk(path).await {
         Ok(files) => files,
         Err(e) => {
-            update_status_failed(state).await;
+            update_status_failed(state, path).await;
             return Err(e).context("Failed to walk codebase");
         }
     };
@@ -164,7 +169,7 @@ pub async fn index_codebase(
     let previous_manifest = match state.manifest_store.load(path) {
         Ok(previous) => previous,
         Err(e) => {
-            update_status_failed(state).await;
+            update_status_failed(state, path).await;
             return Err(e).context("Failed to load index manifest");
         }
     };
@@ -185,13 +190,13 @@ pub async fn index_codebase(
                 ) {
                     Ok(diff) => diff,
                     Err(e) => {
-                        update_status_failed(state).await;
+                        update_status_failed(state, path).await;
                         return Err(e).context("Failed to diff index manifest");
                     }
                 };
 
                 if diff.is_empty() {
-                    update_status_completed(state, 0).await;
+                    update_status_completed(state, path, 0).await;
                     return Ok(IndexResult {
                         files_processed: 0,
                         chunks_created: 0,
@@ -230,19 +235,19 @@ pub async fn index_codebase(
     }
 
     if let Err(e) = prepare_vector_index(state, &collection_name, full_reindex).await {
-        update_status_failed(state).await;
+        update_status_failed(state, path).await;
         return Err(e).context("Failed to prepare Milvus collection");
     }
 
     if let Err(e) = prepare_lexical_index(path, &stale_relative_paths, full_reindex).await {
-        update_status_failed(state).await;
+        update_status_failed(state, path).await;
         return Err(e).context("Failed to prepare lexical index");
     }
 
     if !stale_relative_paths.is_empty() {
         let filter = build_relative_path_filter(&stale_relative_paths);
         if let Err(e) = state.milvus_client.delete(&collection_name, &filter).await {
-            update_status_failed(state).await;
+            update_status_failed(state, path).await;
             return Err(e).context("Failed to delete stale vectors");
         }
     }
@@ -258,11 +263,11 @@ pub async fn index_codebase(
                 .manifest_store
                 .write_for_files(path, &collection_name, &index_inputs, &files)
         {
-            update_status_failed(state).await;
+            update_status_failed(state, path).await;
             return Err(e).context("Failed to write index manifest");
         }
 
-        update_status_completed(state, 0).await;
+        update_status_completed(state, path, 0).await;
         return Ok(IndexResult {
             files_processed: 0,
             chunks_created: 0,
@@ -292,6 +297,9 @@ pub async fn index_codebase(
                             // We can't await in rayon, so we use try_write
                             if let Ok(mut status) = status_ref.try_write() {
                                 status.processed_files = count;
+                                let snapshot = status.clone();
+                                drop(status);
+                                let _ = state.manifest_store.write_status(path, &snapshot);
                             }
                         }
                         Ok(chunks)
@@ -326,6 +334,7 @@ pub async fn index_codebase(
         let mut status = state.indexing_status.write().await;
         status.processed_files = files_to_index.len();
         status.total_chunks = total_chunks;
+        let _ = state.manifest_store.write_status(path, &status);
     }
 
     // Keep the lexical index in sync with the chunk set before embeddings/Milvus insertion.
@@ -340,7 +349,7 @@ pub async fn index_codebase(
     .context("Lexical index task panicked")
     .and_then(|result| result)
     {
-        update_status_failed(state).await;
+        update_status_failed(state, path).await;
         return Err(e).context("Failed to update lexical index");
     }
 
@@ -350,11 +359,11 @@ pub async fn index_codebase(
                 .manifest_store
                 .write_for_files(path, &collection_name, &index_inputs, &files)
         {
-            update_status_failed(state).await;
+            update_status_failed(state, path).await;
             return Err(e).context("Failed to write index manifest");
         }
 
-        update_status_completed(state, 0).await;
+        update_status_completed(state, path, 0).await;
         return Ok(IndexResult {
             files_processed: files_to_index.len(),
             chunks_created: 0,
@@ -365,134 +374,110 @@ pub async fn index_codebase(
         });
     }
 
-    // Phase 3: Batch embed chunks (100 at a time for API efficiency)
-    let mut all_embeddings = Vec::with_capacity(total_chunks);
+    // Phase 3/4: Stream embedding + insertion in small batches so the first
+    // successful Milvus writes land early and progress survives long runs.
     let embedding_client = state.embedding_client.clone();
+    let milvus_client = state.milvus_client.clone();
 
-    // Process embeddings in batches using tokio for async parallelism
     let chunk_batches: Vec<_> = all_chunks.chunks(EMBEDDING_BATCH_SIZE).collect();
     let num_embedding_batches = chunk_batches.len();
     info!(
-        "Generating embeddings in {} batches of {}",
+        "Streaming embeddings + inserts in {} batches of {}",
         num_embedding_batches, EMBEDDING_BATCH_SIZE
     );
 
-    // Process embedding batches with controlled concurrency
-    // Using tokio::spawn for true async parallelism on embedding API calls
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(4)); // Limit concurrent API calls
-    let mut embedding_handles = Vec::with_capacity(num_embedding_batches);
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+    let mut batch_handles = FuturesUnordered::new();
+    let mut embeddings_generated = 0usize;
+    let mut vectors_inserted = 0usize;
+    let mut batch_failures = Vec::new();
 
     for batch in chunk_batches {
-        let batch_texts: Vec<String> = batch.iter().map(|c| c.content.clone()).collect();
+        let batch_chunks: Vec<CodeChunk> = batch.to_vec();
         let client = embedding_client.clone();
+        let milvus = milvus_client.clone();
+        let collection = collection_name.clone();
         let permit = semaphore.clone().acquire_owned().await?;
 
-        let handle = tokio::spawn(async move {
-            let result = client.embed_batch(&batch_texts).await;
-            drop(permit); // Release semaphore
-            result
-        });
-        embedding_handles.push(handle);
+        batch_handles.push(tokio::spawn(async move {
+            let batch_texts: Vec<String> = batch_chunks.iter().map(|c| c.content.clone()).collect();
+            let embeddings = client.embed_batch(&batch_texts).await?;
+            let insert_rows: Vec<InsertRow> = batch_chunks
+                .into_iter()
+                .zip(embeddings.into_iter())
+                .map(|(chunk, embedding)| InsertRow {
+                    id: milvus_id_for_chunk_id(&chunk.id),
+                    content: chunk.content.clone(),
+                    vector: embedding.vector,
+                    metadata: serde_json::json!({
+                        "file_path": chunk.file_path,
+                        "relative_path": chunk.relative_path,
+                        "start_line": chunk.start_line,
+                        "end_line": chunk.end_line,
+                        "language": chunk.language,
+                    }),
+                })
+                .collect();
+
+            let mut inserted = 0usize;
+            for rows in insert_rows.chunks(MILVUS_BATCH_SIZE) {
+                milvus.insert_batch(&collection, rows).await?;
+                inserted += rows.len();
+            }
+
+            drop(permit);
+            Ok::<(usize, usize), anyhow::Error>((batch_texts.len(), inserted))
+        }));
     }
 
-    // Collect embedding results
-    let mut embeddings_generated = 0;
-    for handle in embedding_handles {
-        match handle.await {
-            Ok(Ok(embeddings)) => {
-                embeddings_generated += embeddings.len();
-                all_embeddings.extend(embeddings);
+    while let Some(handle) = batch_handles.next().await {
+        match handle {
+            Ok(Ok((embedded, inserted))) => {
+                embeddings_generated += embedded;
+                vectors_inserted += inserted;
+                info!(
+                    "Streaming progress: embeddings_generated={} vectors_inserted={}",
+                    embeddings_generated,
+                    vectors_inserted
+                );
+                let mut status = state.indexing_status.write().await;
+                status.embeddings_generated = embeddings_generated;
+                status.vectors_inserted = vectors_inserted;
+                let _ = state.manifest_store.write_status(path, &status);
             }
             Ok(Err(e)) => {
-                warn!("Embedding batch failed: {}", e);
-                warnings.push(format!("Embedding batch failed: {}", e));
+                warn!("Streaming batch failed: {}", e);
+                batch_failures.push(format!("Streaming batch failed: {}", e));
             }
             Err(e) => {
-                warn!("Embedding task panicked: {}", e);
-                warnings.push(format!("Embedding task panicked: {}", e));
+                warn!("Streaming batch task panicked: {}", e);
+                batch_failures.push(format!("Streaming batch task panicked: {}", e));
             }
         }
+    }
+
+    if !batch_failures.is_empty() {
+        update_status_failed(state, path).await;
+        anyhow::bail!(
+            "Streaming index failed after inserting {} vectors: {}",
+            vectors_inserted,
+            batch_failures.join("; ")
+        );
     }
 
     info!("Generated {} embeddings", embeddings_generated);
 
-    if all_embeddings.is_empty() {
-        update_status_failed(state).await;
+    if embeddings_generated == 0 {
+        update_status_failed(state, path).await;
         anyhow::bail!("Failed to generate any embeddings");
     }
 
-    // Phase 4: Batch insert into Milvus
-    let milvus_client = state.milvus_client.clone();
-    let mut vectors_inserted = 0;
-
     info!("Using collection: {}", collection_name);
-
-    // Convert chunks + embeddings to InsertRows
-    let insert_rows: Vec<InsertRow> = all_chunks
-        .into_iter()
-        .zip(all_embeddings.into_iter())
-        .map(|(chunk, embedding)| InsertRow {
-            id: milvus_id_for_chunk_id(&chunk.id),
-            content: chunk.content.clone(),
-            vector: embedding.vector,
-            metadata: serde_json::json!({
-                "file_path": chunk.file_path,
-                "relative_path": chunk.relative_path,
-                "start_line": chunk.start_line,
-                "end_line": chunk.end_line,
-                "language": chunk.language,
-            }),
-        })
-        .collect();
-
-    // Insert in larger batches for network efficiency
-    let insert_batches: Vec<&[InsertRow]> = insert_rows.chunks(MILVUS_BATCH_SIZE).collect();
-
-    let num_insert_batches = insert_batches.len();
-    info!(
-        "Inserting into Milvus in {} batches of {}",
-        num_insert_batches, MILVUS_BATCH_SIZE
-    );
-
-    // Use tokio::spawn for parallel Milvus insertions with controlled concurrency
-    let insert_semaphore = Arc::new(tokio::sync::Semaphore::new(2)); // Limit concurrent DB writes
-    let mut insert_handles = Vec::with_capacity(num_insert_batches);
-
-    for batch in insert_batches {
-        let batch_data: Vec<InsertRow> = batch.to_vec();
-        let client = milvus_client.clone();
-        let collection = collection_name.clone();
-        let permit = insert_semaphore.clone().acquire_owned().await?;
-
-        let handle = tokio::spawn(async move {
-            let result = client.insert_batch(&collection, &batch_data).await;
-            drop(permit);
-            result.map(|_| batch_data.len())
-        });
-        insert_handles.push(handle);
-    }
-
-    // Collect insertion results
-    for handle in insert_handles {
-        match handle.await {
-            Ok(Ok(count)) => {
-                vectors_inserted += count;
-            }
-            Ok(Err(e)) => {
-                error!("Milvus insertion failed: {}", e);
-                warnings.push(format!("Milvus insertion failed: {}", e));
-            }
-            Err(e) => {
-                error!("Milvus insertion task panicked: {}", e);
-                warnings.push(format!("Milvus insertion task panicked: {}", e));
-            }
-        }
-    }
 
     info!("Inserted {} vectors into Milvus", vectors_inserted);
 
     if vectors_inserted == 0 {
-        update_status_failed(state).await;
+        update_status_failed(state, path).await;
         anyhow::bail!(
             "Generated {} chunks and {} embeddings, but inserted 0 vectors into Milvus{}",
             total_chunks,
@@ -510,12 +495,12 @@ pub async fn index_codebase(
             .manifest_store
             .write_for_files(path, &collection_name, &index_inputs, &files)
     {
-        update_status_failed(state).await;
+        update_status_failed(state, path).await;
         return Err(e).context("Failed to write index manifest");
     }
 
     // Update final status
-    update_status_completed(state, total_chunks).await;
+    update_status_completed(state, path, total_chunks).await;
 
     let duration_ms = start.elapsed().as_millis() as u64;
     info!(
@@ -544,15 +529,18 @@ pub fn spawn_index_codebase(
     tokio::spawn(async move { index_codebase(&state, &path, force).await })
 }
 
-async fn update_status_failed(state: &IndexerState) {
+async fn update_status_failed(state: &IndexerState, path: &Path) {
     let mut status = state.indexing_status.write().await;
     status.status = IndexState::Failed;
+    let _ = state.manifest_store.write_status(path, &status);
 }
 
-async fn update_status_completed(state: &IndexerState, chunks: usize) {
+async fn update_status_completed(state: &IndexerState, path: &Path, chunks: usize) {
     let mut status = state.indexing_status.write().await;
     status.total_chunks = chunks;
+    status.processed_files = status.total_files;
     status.status = IndexState::Completed;
+    let _ = state.manifest_store.write_status(path, &status);
 }
 
 async fn prepare_vector_index(

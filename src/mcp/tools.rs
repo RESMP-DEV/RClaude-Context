@@ -318,10 +318,13 @@ impl CodebaseTools {
                 total_files: 0,
                 processed_files: 0,
                 total_chunks: 0,
+                embeddings_generated: 0,
+                vectors_inserted: 0,
                 status: crate::types::IndexState::Indexing,
             },
         );
-        let status_mirror = mirror_index_status(self.state.clone(), indexer_state.clone(), path.clone());
+        let status_mirror =
+            mirror_index_status(self.state.clone(), indexer_state.clone(), path.clone());
         let result = indexer::index_codebase(&indexer_state, &path, params.force).await;
         let _ = status_mirror.await;
         let result = result.map_err(|err| McpError::internal_error(err.to_string(), None))?;
@@ -478,6 +481,7 @@ impl CodebaseTools {
                 .map_err(|err| McpError::internal_error(err.to_string(), None))?;
         }
         self.state.set_status(path.clone(), IndexStatus::default());
+        let _ = self.state.manifest_store.clear_status(&path);
 
         // Clearing is best-effort here: remove tracked status and report success
         // without failing if the backing collection has not been created yet.
@@ -712,7 +716,7 @@ mod tests {
             milvus_url: milvus.base_url.clone(),
             ..Config::default()
         };
-        let tools = CodebaseTools::with_state(create_shared_state(config));
+        let tools = CodebaseTools::with_state(create_shared_state(config.clone()));
 
         let Json(results) = tools
             .search_code(Parameters(SearchCodeParams {
@@ -813,7 +817,7 @@ mod tests {
             milvus_url: milvus.base_url.clone(),
             ..Config::default()
         };
-        let tools = CodebaseTools::with_state(create_shared_state(config));
+        let tools = CodebaseTools::with_state(create_shared_state(config.clone()));
 
         let Json(results) = tools
             .search_code(Parameters(SearchCodeParams {
@@ -886,7 +890,7 @@ mod tests {
             embedding_dimension: 3,
             ..Config::default()
         };
-        let tools = CodebaseTools::with_state(create_shared_state(config));
+        let tools = CodebaseTools::with_state(create_shared_state(config.clone()));
 
         let Json(result) = tools
             .index_codebase(Parameters(IndexCodebaseParams {
@@ -898,7 +902,8 @@ mod tests {
 
         assert!(result.success);
 
-        let Json(status) = tools
+        let fresh_tools = CodebaseTools::with_state(create_shared_state(config));
+        let Json(status) = fresh_tools
             .get_indexing_status(Parameters(GetIndexingStatusParams {
                 path: repo_dir.path().to_string_lossy().into_owned(),
             }))
