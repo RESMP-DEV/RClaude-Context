@@ -9,7 +9,7 @@ keywords = ["mcp", "code-search", "semantic-indexing", "tree-sitter", "milvus"]
 categories = ["development-tools", "text-processing"]
 
 [dependencies]
-rmcp = { version = "0.12", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "0.15.0", features = ["server", "transport-io", "macros"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 futures = "0.3"
