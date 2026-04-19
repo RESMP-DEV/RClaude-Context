@@ -24,8 +24,8 @@ use crate::embedding::EmbeddingClient;
 use crate::lexical::LexicalIndex;
 use crate::splitter::CodeSplitter;
 use crate::types::{CodeChunk, IndexState, IndexStatus};
-use crate::vectordb::{collection_name_from_path, InsertRow, MilvusClient};
 use crate::vectordb::client::milvus_id_for_chunk_id;
+use crate::vectordb::{collection_name_from_path, InsertRow, MilvusClient};
 use crate::walker::CodeWalker;
 
 /// Batch size for embedding requests - balances throughput vs memory.
@@ -115,11 +115,7 @@ impl IndexerState {
 /// * `Ok(IndexResult)` - Summary of the indexing operation
 /// * `Err` - If any critical error occurs
 #[instrument(skip(state), fields(path = %path.display()))]
-pub async fn index_codebase(
-    state: &IndexerState,
-    path: &Path,
-    force: bool,
-) -> Result<IndexResult> {
+pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> Result<IndexResult> {
     let start = Instant::now();
     let mut warnings = Vec::new();
 
@@ -437,8 +433,7 @@ pub async fn index_codebase(
                 vectors_inserted += inserted;
                 info!(
                     "Streaming progress: embeddings_generated={} vectors_inserted={}",
-                    embeddings_generated,
-                    vectors_inserted
+                    embeddings_generated, vectors_inserted
                 );
                 let mut status = state.indexing_status.write().await;
                 status.embeddings_generated = embeddings_generated;
@@ -1084,7 +1079,9 @@ mod tests {
         };
 
         let err = index_codebase(&state, root, true).await.unwrap_err();
-        assert!(err.to_string().contains("inserted 0 vectors into Milvus"));
+        assert!(err
+            .to_string()
+            .contains("Streaming index failed after inserting 0 vectors"));
         assert_eq!(state.get_status().await.status, IndexState::Failed);
 
         embedding.wait().await;

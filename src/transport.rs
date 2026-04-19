@@ -277,6 +277,7 @@ mod tests {
 
         let encoded = String::from_utf8(buf.to_vec()).unwrap();
         assert!(encoded.starts_with("Content-Length: "));
+        assert!(encoded.contains("\r\n\r\n"));
         assert!(encoded.ends_with("{\"jsonrpc\":\"2.0\"}"));
     }
 }

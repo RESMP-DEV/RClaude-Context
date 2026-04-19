@@ -171,10 +171,22 @@ Add to `.mcp.json` in the project root.
 
 Once configured, the server exposes four tools:
 
-- **`index_codebase`** — Walk, split, embed, and store a directory. Incremental by default; pass `force: true` to re-index everything.
-- **`search_code`** — Hybrid search (semantic + BM25 lexical) with Reciprocal Rank Fusion. Returns code chunks with file paths, line numbers, and relevance scores.
+- **`index_codebase`** — Starts indexing a directory in the background. Incremental by default; pass `force: true` to rebuild from scratch. Poll `get_indexing_status` until the status becomes `completed` or `failed`.
+- **`search_code`** — Hybrid search (semantic + BM25 lexical) with Reciprocal Rank Fusion. Returns code chunks with file paths, line numbers, and relevance scores. If semantic search is unavailable but the lexical index exists, the server falls back to lexical-only results.
 - **`get_indexing_status`** — Check whether indexing is in progress, completed, or not started.
 - **`clear_index`** — Remove all indexed data (vectors + lexical index) for a codebase.
+
+### MCP-specific behavior
+
+`index_codebase` intentionally returns quickly instead of holding the MCP stdio request open until the whole repository is indexed. Long-running MCP tool calls are a common source of client-side failures and timeouts even when the underlying indexing pipeline works correctly.
+
+Use this pattern:
+
+1. Call `index_codebase` with an absolute repository path.
+2. Poll `get_indexing_status` for the same absolute path.
+3. Start calling `search_code` once the status is `completed`.
+
+All tool paths must be absolute filesystem paths. Relative paths are rejected.
 
 ## Migrating from @zilliz/claude-context-mcp
 
@@ -237,6 +249,7 @@ Since the embedding model and chunk boundaries differ, clear your existing index
 ```
 > clear_index for /path/to/project
 > index_codebase for /path/to/project
+> get_indexing_status for /path/to/project
 ```
 
 Subsequent runs will be incremental — only changed files get re-indexed.

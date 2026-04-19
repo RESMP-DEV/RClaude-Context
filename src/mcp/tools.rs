@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 use tokio::task;
 use tokio::time::{sleep, Duration};
 
-use super::indexer::{self, IndexerState};
 use super::hybrid::{fuse_hybrid_hits, HybridFusionOptions, HybridHit};
+use super::indexer::{self, IndexerState};
 use super::state::{create_default_shared_state, SharedState};
 use crate::config::Config;
 use crate::embedding::{EmbeddingClient, EmbeddingConfig};
@@ -98,6 +98,22 @@ fn mirror_index_status(
             sleep(Duration::from_millis(250)).await;
         }
     })
+}
+
+fn spawn_background_index(
+    shared_state: SharedState,
+    indexer_state: Arc<IndexerState>,
+    path: PathBuf,
+    force: bool,
+) {
+    tokio::spawn(async move {
+        let status_mirror =
+            mirror_index_status(shared_state.clone(), indexer_state.clone(), path.clone());
+        if let Err(err) = indexer::index_codebase(&indexer_state, &path, force).await {
+            tracing::error!(path = %path.display(), ?err, "Background indexing failed");
+        }
+        let _ = status_mirror.await;
+    });
 }
 
 /// Parameters for checking indexing status.
@@ -304,9 +320,9 @@ impl CodebaseTools {
         let params = params.0;
         let path = validate_directory_path(&params.path)?;
 
-        if self.state.is_indexing(&path) && !params.force {
+        if self.state.is_indexing(&path) {
             return Err(invalid_path(format!(
-                "Indexing is already running for {}. Use force=true to rebuild the index.",
+                "Indexing is already running for {}. Wait for it to finish before starting another run.",
                 path.display()
             )));
         }
@@ -323,22 +339,22 @@ impl CodebaseTools {
                 status: crate::types::IndexState::Indexing,
             },
         );
-        let status_mirror =
-            mirror_index_status(self.state.clone(), indexer_state.clone(), path.clone());
-        let result = indexer::index_codebase(&indexer_state, &path, params.force).await;
-        let _ = status_mirror.await;
-        let result = result.map_err(|err| McpError::internal_error(err.to_string(), None))?;
+        spawn_background_index(
+            self.state.clone(),
+            indexer_state,
+            path.clone(),
+            params.force,
+        );
 
         Ok(Json(IndexResult {
             success: true,
-            message: if result.warnings.is_empty() {
-                format!("Indexed {}", params.path)
-            } else {
-                format!("Indexed {} ({})", params.path, result.warnings.join("; "))
-            },
+            message: format!(
+                "Started indexing {}. Poll get_indexing_status for progress and completion.",
+                params.path
+            ),
             path,
-            files_indexed: result.files_processed,
-            chunks_created: result.chunks_created,
+            files_indexed: 0,
+            chunks_created: 0,
         }))
     }
 
@@ -371,13 +387,15 @@ impl CodebaseTools {
             .state
             .search(&collection, &params.query, params.limit as usize)
             .await
-            .map_err(|err| McpError::internal_error(err.to_string(), None))?
-            .into_iter()
-            .map(|result| HybridHit {
-                chunk: result.chunk,
-                score: result.score,
-            })
-            .collect::<Vec<_>>();
+            .map(|results| {
+                results
+                    .into_iter()
+                    .map(|result| HybridHit {
+                        chunk: result.chunk,
+                        score: result.score,
+                    })
+                    .collect::<Vec<_>>()
+            });
         let lexical_path = path.clone();
         let lexical_query = params.query.clone();
         let lexical_limit = params.limit as usize;
@@ -402,6 +420,24 @@ impl CodebaseTools {
         .map_err(|err| {
             McpError::internal_error(format!("Failed to search lexical index: {err}"), None)
         })?;
+        let vector_hits = match vector_hits {
+            Ok(vector_hits) => vector_hits,
+            Err(err) if !lexical_hits.is_empty() => {
+                tracing::warn!(
+                    path = %path.display(),
+                    ?err,
+                    "Semantic search failed; returning lexical-only results"
+                );
+                Vec::new()
+            }
+            Err(err) => {
+                return Err(McpError::internal_error(
+                    format!("Failed to search semantic index: {err}"),
+                    None,
+                ));
+            }
+        };
+
         let options = HybridFusionOptions {
             limit: params.limit as usize,
             extension_filter: params.extensions.clone(),
@@ -842,34 +878,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_search_code_falls_back_to_lexical_hits_when_semantic_search_fails() {
+        let repo_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let _cache_guard = set_test_cache_dir_async(cache_dir.path()).await;
+        let lexical_index = LexicalIndex::create(repo_dir.path()).unwrap();
+        lexical_index
+            .insert_chunks(&[crate::types::CodeChunk {
+                id: "chunk-lexical-only".to_string(),
+                content: "fn calculate_score(value: i32) -> i32 { value + 1 }".to_string(),
+                file_path: repo_dir.path().join("src/lib.rs"),
+                relative_path: "src/lib.rs".to_string(),
+                start_line: 1,
+                end_line: 1,
+                language: "rust".to_string(),
+            }])
+            .unwrap();
+
+        let config = Config {
+            embedding_url: "http://127.0.0.1:9/v1".to_string(),
+            embedding_model: "test".to_string(),
+            ..Config::default()
+        };
+        let tools = CodebaseTools::with_state(create_shared_state(config));
+
+        let Json(results) = tools
+            .search_code(Parameters(SearchCodeParams {
+                path: repo_dir.path().to_string_lossy().into_owned(),
+                query: "calculate_score".to_string(),
+                limit: 5,
+                extensions: Vec::new(),
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(results.count, 1);
+        assert_eq!(results.results[0].relative_path, "src/lib.rs");
+        assert_eq!(
+            results.results[0].file_path,
+            repo_dir.path().join("src/lib.rs")
+        );
+        assert!(results.results[0].score > 0.0);
+    }
+
+    #[tokio::test]
     async fn test_index_codebase_updates_shared_status() {
-        let milvus = spawn_mock_json_server_map_with_limit(HashMap::from([
-            (
-                "/v2/vectordb/collections/has",
-                serde_json::json!({
-                    "code": 0,
-                    "data": {"has": false}
-                }),
-            ),
-            (
-                "/v2/vectordb/collections/create",
-                serde_json::json!({
-                    "code": 0
-                }),
-            ),
-            (
-                "/v2/vectordb/entities/insert",
-                serde_json::json!({
-                    "code": 0
-                }),
-            ),
-            (
-                "/v2/vectordb/entities/delete",
-                serde_json::json!({
-                    "code": 0
-                }),
-            ),
-        ]), 8)
+        let milvus = spawn_mock_json_server_map_with_limit(
+            HashMap::from([
+                (
+                    "/v2/vectordb/collections/has",
+                    serde_json::json!({
+                        "code": 0,
+                        "data": {"has": false}
+                    }),
+                ),
+                (
+                    "/v2/vectordb/collections/create",
+                    serde_json::json!({
+                        "code": 0
+                    }),
+                ),
+                (
+                    "/v2/vectordb/entities/insert",
+                    serde_json::json!({
+                        "code": 0
+                    }),
+                ),
+                (
+                    "/v2/vectordb/entities/delete",
+                    serde_json::json!({
+                        "code": 0
+                    }),
+                ),
+            ]),
+            8,
+        )
         .await;
         let embedding = spawn_mock_embedding_server(serde_json::json!({
             "data": [{"embedding": [0.1, 0.2, 0.3]}],
@@ -881,7 +964,11 @@ mod tests {
         let repo_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let _cache_guard = set_test_cache_dir_async(cache_dir.path()).await;
-        std::fs::write(repo_dir.path().join("main.py"), "def add(a, b):\n    return a + b\n").unwrap();
+        std::fs::write(
+            repo_dir.path().join("main.py"),
+            "def add(a, b):\n    return a + b\n",
+        )
+        .unwrap();
 
         let config = Config {
             embedding_url: embedding.base_url.clone(),
@@ -901,14 +988,23 @@ mod tests {
             .unwrap();
 
         assert!(result.success);
+        assert!(result.message.contains("Started indexing"));
 
         let fresh_tools = CodebaseTools::with_state(create_shared_state(config));
-        let Json(status) = fresh_tools
-            .get_indexing_status(Parameters(GetIndexingStatusParams {
-                path: repo_dir.path().to_string_lossy().into_owned(),
-            }))
-            .await
-            .unwrap();
+        let mut status = IndexStatus::default();
+        for _ in 0..40 {
+            let Json(current_status) = fresh_tools
+                .get_indexing_status(Parameters(GetIndexingStatusParams {
+                    path: repo_dir.path().to_string_lossy().into_owned(),
+                }))
+                .await
+                .unwrap();
+            status = current_status;
+            if status.status == crate::types::IndexState::Completed {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
 
         assert_eq!(status.status, crate::types::IndexState::Completed);
         assert_eq!(status.processed_files, 1);
