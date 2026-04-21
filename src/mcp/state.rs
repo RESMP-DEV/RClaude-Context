@@ -50,8 +50,12 @@ pub struct ContextState {
 
 impl ContextState {
     pub fn new(config: Config) -> Self {
-        let embedding_explicitly_set = std::env::var("EMBEDDING_URL").is_ok();
-        let milvus_explicitly_set = std::env::var("MILVUS_URL").is_ok();
+        let embedding_explicitly_set = std::env::var("EMBEDDING_URL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        let milvus_explicitly_set = std::env::var("MILVUS_URL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
 
         let embedder = if embedding_explicitly_set {
             let embedding_config = EmbeddingConfig::from_config(&config);

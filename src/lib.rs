@@ -3,7 +3,7 @@ pub mod embedding;
 pub mod lexical;
 pub mod mcp;
 pub mod splitter;
-pub mod transport;
+
 pub mod types;
 pub mod vectordb;
 pub mod walker;

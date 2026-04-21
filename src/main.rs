@@ -1,9 +1,9 @@
 use anyhow::Result;
+use rmcp::transport::io::stdio;
+use rmcp::ServiceExt;
 use rust_sindexer::config::Config;
 use rust_sindexer::mcp::create_shared_state;
 use rust_sindexer::mcp::CodebaseTools;
-use rust_sindexer::transport::StdioTransport;
-use rmcp::ServiceExt;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[tokio::main]
@@ -17,9 +17,7 @@ async fn main() -> Result<()> {
 
     let config = Config::from_env();
     let tools = CodebaseTools::with_state(create_shared_state(config));
-    let transport = StdioTransport::new(tokio::io::stdin(), tokio::io::stdout());
-
-    let service = tools.serve(transport).await?;
+    let service = tools.serve(stdio()).await?;
 
     tracing::info!("MCP server initialized, waiting for requests");
 
