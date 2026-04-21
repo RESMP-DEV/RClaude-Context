@@ -888,7 +888,7 @@ mod tests {
         let first_result = index_codebase(&state, root, false).await.unwrap();
         assert!(first_result.files_processed >= 2);
 
-        let manifest_path = root.join(".rust_sindexer").join("index-manifest.json");
+        let manifest_path = root.join(".sindexer").join("index-manifest.json");
         assert!(manifest_path.exists());
 
         let second_result = index_codebase(&state, root, false).await.unwrap();

@@ -224,11 +224,11 @@ fn fingerprint_files(root: &Path, files: &[PathBuf]) -> Result<Vec<FileFingerpri
 }
 
 fn manifest_path(root: &Path) -> PathBuf {
-    root.join(".rust_sindexer").join("index-manifest.json")
+    root.join(".sindexer").join("index-manifest.json")
 }
 
 fn status_path(root: &Path) -> PathBuf {
-    root.join(".rust_sindexer").join("index-status.json")
+    root.join(".sindexer").join("index-status.json")
 }
 
 #[cfg(test)]

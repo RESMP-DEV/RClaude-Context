@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rust_sindexer::mcp::manifest::{diff_manifest_against_files, IndexInputs, ManifestStore};
+use sindexer::mcp::manifest::{diff_manifest_against_files, IndexInputs, ManifestStore};
 use tempfile::TempDir;
 
 fn create_file(root: &Path, relative_path: &str, content: &str) {
@@ -23,7 +23,7 @@ fn collect_files(root: &Path) -> Vec<PathBuf> {
         for entry in entries {
             // Skip the manifest directory
             if entry.is_dir() {
-                if entry.file_name().map_or(false, |name| name == ".rust_sindexer") {
+                if entry.file_name().map_or(false, |name| name == ".sindexer") {
                     continue;
                 }
                 visit(&entry, root, out);

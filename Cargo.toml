@@ -1,5 +1,5 @@
 [package]
-name = "rust_sindexer"
+name = "sindexer"
 version = "0.1.0"
 edition = "2021"
 description = "High-performance Rust MCP server for semantic code indexing and search"

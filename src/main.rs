@@ -1,9 +1,9 @@
 use anyhow::Result;
 use rmcp::transport::io::stdio;
 use rmcp::ServiceExt;
-use rust_sindexer::config::Config;
-use rust_sindexer::mcp::create_shared_state;
-use rust_sindexer::mcp::CodebaseTools;
+use sindexer::config::Config;
+use sindexer::mcp::create_shared_state;
+use sindexer::mcp::CodebaseTools;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[tokio::main]
@@ -13,7 +13,7 @@ async fn main() -> Result<()> {
         .with(EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()))
         .init();
 
-    tracing::info!("Starting rust_sindexer MCP server");
+    tracing::info!("Starting sindexer MCP server");
 
     let config = Config::from_env();
     let tools = CodebaseTools::with_state(create_shared_state(config));

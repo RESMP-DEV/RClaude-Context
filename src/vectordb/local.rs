@@ -211,13 +211,13 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 
 fn dirs_path() -> PathBuf {
     if let Ok(dir) = std::env::var("XDG_CACHE_HOME") {
-        PathBuf::from(dir).join("rust_sindexer")
+        PathBuf::from(dir).join("sindexer")
     } else if let Some(home) = std::env::var_os("HOME") {
         PathBuf::from(home)
             .join(".cache")
-            .join("rust_sindexer")
+            .join("sindexer")
     } else {
-        PathBuf::from("/tmp/rust_sindexer")
+        PathBuf::from("/tmp/sindexer")
     }
 }
 
